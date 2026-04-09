@@ -27,10 +27,18 @@ echo " Log Ingestion Service — Manual Tests"
 echo "========================================="
 echo ""
 
-# 1. Health check
-echo "[1] Health Check"
+# 1. Root endpoint
+echo "[1] Root Endpoint"
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/")
 check "GET / returns 200" "200" "$STATUS"
+echo ""
+
+# 1b. Health endpoint
+echo "[1b] Health Endpoint"
+HEALTH=$(curl -s "$BASE_URL/health")
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health")
+check "GET /health returns 200" "200" "$STATUS"
+echo "  Health response: $HEALTH"
 echo ""
 
 # 2. Auth — no header

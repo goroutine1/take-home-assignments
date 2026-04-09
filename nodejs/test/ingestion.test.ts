@@ -1,37 +1,19 @@
-import { describe, it, expect } from 'vitest';
-import express from 'express';
+import { describe, it, expect, afterEach } from 'vitest';
 import request from 'supertest';
-import { InMemoryApiKeyStore } from '../src/auth/memory-store';
-import { InMemoryQueue } from '../src/queue/memory-queue';
-import { LogEntry } from '../src/queue/types';
-import { authMiddleware } from '../src/middleware/auth';
-import { rateLimiterMiddleware, InMemorySlidingWindowLimiter } from '../src/middleware/rate-limiter';
-import { validateLogsMiddleware } from '../src/middleware/validate';
+import { createApp } from '../src/app';
 
-function buildTestApp() {
-  const app = express();
-  const queue = new InMemoryQueue();
-  const store = new InMemoryApiKeyStore(['valid-key']);
-
-  app.use(express.json({ limit: '1mb' }));
-  app.post(
-    '/logs/json',
-    authMiddleware(store),
-    rateLimiterMiddleware(new InMemorySlidingWindowLimiter(10)),
-    validateLogsMiddleware,
-    (req, res) => {
-      if (queue.isFull()) {
-        res.status(503).json({ error: 'Service overloaded, try again later' });
-        return;
-      }
-      const entries = (req as express.Request & { logEntries: LogEntry[] }).logEntries;
-      queue.enqueue(entries);
-      res.status(202).json({ accepted: entries.length, queueDepth: queue.size() });
-    },
-  );
-
-  return { app, queue };
-}
+const testConfig = {
+  apiKeys: ['valid-key'],
+  rateLimit: { maxRequestsPerSecond: 10 },
+  queue: { maxSize: 10_000 },
+  worker: {
+    concurrency: 5,
+    pollIntervalMs: 60_000, // long interval so worker doesn't interfere with tests
+    maxRetries: 3,
+    simulatedDelayMs: 10,
+    failureRate: 0,
+  },
+};
 
 const validPayload = [
   {
@@ -42,15 +24,30 @@ const validPayload = [
   },
 ];
 
+let shutdownFn: (() => Promise<void>) | null = null;
+
+afterEach(async () => {
+  if (shutdownFn) {
+    await shutdownFn();
+    shutdownFn = null;
+  }
+});
+
+function buildApp(overrides = {}) {
+  const { app, shutdown, queue } = createApp({ ...testConfig, ...overrides });
+  shutdownFn = shutdown;
+  return { app, queue };
+}
+
 describe('POST /logs/json', () => {
   it('returns 401 without auth header', async () => {
-    const { app } = buildTestApp();
+    const { app } = buildApp();
     const res = await request(app).post('/logs/json').send(validPayload);
     expect(res.status).toBe(401);
   });
 
   it('returns 401 with invalid key', async () => {
-    const { app } = buildTestApp();
+    const { app } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer invalid-key')
@@ -59,7 +56,7 @@ describe('POST /logs/json', () => {
   });
 
   it('returns 400 for non-array payload', async () => {
-    const { app } = buildTestApp();
+    const { app } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
@@ -68,7 +65,7 @@ describe('POST /logs/json', () => {
   });
 
   it('returns 400 for empty array', async () => {
-    const { app } = buildTestApp();
+    const { app } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
@@ -76,17 +73,17 @@ describe('POST /logs/json', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 400 for invalid log entries', async () => {
-    const { app } = buildTestApp();
+  it('returns 400 for invalid timestamp format', async () => {
+    const { app } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
-      .send([{ timestamp: 'not-a-date', level: 'info', message: 'test' }]);
+      .send([{ timestamp: 'Tuesday', level: 'info', message: 'test' }]);
     expect(res.status).toBe(400);
   });
 
   it('returns 400 for missing required fields', async () => {
-    const { app } = buildTestApp();
+    const { app } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
@@ -96,7 +93,7 @@ describe('POST /logs/json', () => {
   });
 
   it('accepts valid payload and enqueues', async () => {
-    const { app, queue } = buildTestApp();
+    const { app, queue } = buildApp();
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
@@ -109,7 +106,7 @@ describe('POST /logs/json', () => {
   });
 
   it('accepts batch of multiple entries', async () => {
-    const { app, queue } = buildTestApp();
+    const { app, queue } = buildApp();
     const batch = [
       { timestamp: '2024-11-01T12:00:00Z', level: 'info', message: 'msg1' },
       { timestamp: '2024-11-01T12:00:01Z', level: 'warn', message: 'msg2' },
@@ -126,35 +123,37 @@ describe('POST /logs/json', () => {
     expect(queue.size()).toBe(3);
   });
 
-  it('returns 503 when queue is full', async () => {
-    const app = express();
-    const queue = new InMemoryQueue(1);
-    const store = new InMemoryApiKeyStore(['valid-key']);
+  it('returns 503 when batch would exceed queue capacity', async () => {
+    const { app } = buildApp({ queue: { maxSize: 1 } });
 
-    app.use(express.json({ limit: '1mb' }));
-    app.post(
-      '/logs/json',
-      authMiddleware(store),
-      rateLimiterMiddleware(new InMemorySlidingWindowLimiter(10)),
-      validateLogsMiddleware,
-      (req, res) => {
-        if (queue.isFull()) {
-          res.status(503).json({ error: 'Service overloaded, try again later' });
-          return;
-        }
-        const entries = (req as express.Request & { logEntries: LogEntry[] }).logEntries;
-        queue.enqueue(entries);
-        res.status(202).json({ accepted: entries.length, queueDepth: queue.size() });
-      },
-    );
+    // First request fills the queue
+    await request(app)
+      .post('/logs/json')
+      .set('Authorization', 'Bearer valid-key')
+      .send(validPayload);
 
-    // Fill the queue
-    queue.enqueue([{ timestamp: '2024-01-01T00:00:00Z', level: 'info', message: 'fill' }]);
-
+    // Second request should be rejected
     const res = await request(app)
       .post('/logs/json')
       .set('Authorization', 'Bearer valid-key')
       .send(validPayload);
+
+    expect(res.status).toBe(503);
+  });
+
+  it('returns 503 when batch is larger than remaining capacity', async () => {
+    const { app } = buildApp({ queue: { maxSize: 2 } });
+
+    const batch = [
+      { timestamp: '2024-11-01T12:00:00Z', level: 'info', message: 'msg1' },
+      { timestamp: '2024-11-01T12:00:01Z', level: 'info', message: 'msg2' },
+      { timestamp: '2024-11-01T12:00:02Z', level: 'info', message: 'msg3' },
+    ];
+
+    const res = await request(app)
+      .post('/logs/json')
+      .set('Authorization', 'Bearer valid-key')
+      .send(batch);
 
     expect(res.status).toBe(503);
   });

@@ -3,7 +3,10 @@ import { LogEntry } from '../queue/types';
 
 const VALID_LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
 
+const ISO_8601_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
 function isValidISOTimestamp(value: string): boolean {
+  if (!ISO_8601_REGEX.test(value)) return false;
   const date = new Date(value);
   return !isNaN(date.getTime());
 }

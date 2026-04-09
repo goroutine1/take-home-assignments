@@ -13,9 +13,10 @@ export interface LogEntry {
 }
 
 export interface LogQueue {
-  enqueue(entries: LogEntry[]): void;
+  enqueue(entries: LogEntry[]): number;
   dequeue(): LogEntry | undefined;
   size(): number;
+  remaining(): number;
   isEmpty(): boolean;
   isFull(): boolean;
 }

@@ -1,11 +1,12 @@
 import { trace, SpanStatusCode, context, TraceFlags } from '@opentelemetry/api';
 import { LogEntry, LogQueue } from '../queue/types';
 
-interface WorkerOptions {
+export interface WorkerOptions {
   concurrency: number;
   pollIntervalMs: number;
   maxRetries: number;
   simulatedDelayMs: number;
+  failureRate: number;
 }
 
 const tracer = trace.getTracer('log-ingestion-worker');
@@ -14,7 +15,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function processEntry(entry: LogEntry, queue: LogQueue, retryCount: number, simulatedDelayMs: number): Promise<void> {
+async function processEntry(entry: LogEntry, queue: LogQueue, retryCount: number, simulatedDelayMs: number, failureRate: number): Promise<void> {
   // Restore the parent context from the HTTP request if available
   let parentContext = context.active();
   if (entry.spanContext) {
@@ -41,8 +42,8 @@ async function processEntry(entry: LogEntry, queue: LogQueue, retryCount: number
       const jitter = Math.random() * (simulatedDelayMs / 2);
       await delay(simulatedDelayMs + jitter);
 
-      // Simulate ~10% failure rate to demonstrate retry logic
-      if (Math.random() < 0.1) {
+      // Simulate configurable failure rate to demonstrate retry logic
+      if (failureRate > 0 && Math.random() < failureRate) {
         throw new Error('Simulated processing failure');
       }
 
@@ -136,7 +137,7 @@ export class Worker {
 
   private async processWithRetry(entry: LogEntry, attempt: number): Promise<void> {
     try {
-      await processEntry(entry, this.queue, attempt, this.options.simulatedDelayMs);
+      await processEntry(entry, this.queue, attempt, this.options.simulatedDelayMs, this.options.failureRate);
     } catch (err) {
       if (attempt < this.options.maxRetries) {
         const backoffMs = 100 * Math.pow(2, attempt);

@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { trace, context } from '@opentelemetry/api';
-import { config } from './config';
+import { config as defaultConfig, AppConfig } from './config';
 import { InMemoryApiKeyStore } from './auth/memory-store';
 import { InMemoryQueue } from './queue/memory-queue';
 import { LogEntry } from './queue/types';
@@ -9,12 +9,13 @@ import { rateLimiterMiddleware, InMemorySlidingWindowLimiter } from './middlewar
 import { validateLogsMiddleware } from './middleware/validate';
 import { Worker } from './worker/worker';
 
-export function createApp() {
+export function createApp(overrides?: Partial<AppConfig>) {
+  const cfg = { ...defaultConfig, ...overrides };
   const app = express();
-  const apiKeyStore = new InMemoryApiKeyStore(config.apiKeys);
-  const rateLimiter = new InMemorySlidingWindowLimiter(config.rateLimit.maxRequestsPerSecond);
-  const queue = new InMemoryQueue(config.queue.maxSize);
-  const worker = new Worker(queue, config.worker);
+  const apiKeyStore = new InMemoryApiKeyStore(cfg.apiKeys);
+  const rateLimiter = new InMemorySlidingWindowLimiter(cfg.rateLimit.maxRequestsPerSecond);
+  const queue = new InMemoryQueue(cfg.queue.maxSize);
+  const worker = new Worker(queue, cfg.worker);
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -37,12 +38,12 @@ export function createApp() {
     rateLimiterMiddleware(rateLimiter),
     validateLogsMiddleware,
     (req: Request, res: Response) => {
-      if (queue.isFull()) {
+      const entries = (req as Request & { logEntries: LogEntry[] }).logEntries;
+
+      if (queue.remaining() < entries.length) {
         res.status(503).json({ error: 'Service overloaded, try again later' });
         return;
       }
-
-      const entries = (req as Request & { logEntries: LogEntry[] }).logEntries;
 
       // Capture the active span context from the HTTP request for traceparent propagation
       const activeSpan = trace.getSpan(context.active());
@@ -69,5 +70,5 @@ export function createApp() {
     await worker.stop();
   };
 
-  return { app, shutdown };
+  return { app, shutdown, queue };
 }

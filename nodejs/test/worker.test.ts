@@ -28,6 +28,14 @@ vi.mock('@opentelemetry/api', () => {
   };
 });
 
+const baseWorkerOptions = {
+  concurrency: 5,
+  pollIntervalMs: 50,
+  maxRetries: 3,
+  simulatedDelayMs: 10,
+  failureRate: 0, // deterministic: no random failures
+};
+
 describe('Worker', () => {
   it('processes entries from the queue', async () => {
     const queue = new InMemoryQueue();
@@ -35,18 +43,28 @@ describe('Worker', () => {
       { timestamp: '2024-01-01T00:00:00Z', level: 'info', message: 'test entry' },
     ]);
 
-    const worker = new Worker(queue, {
-      concurrency: 5,
-      pollIntervalMs: 50,
-      maxRetries: 3,
-      simulatedDelayMs: 10,
-    });
+    const worker = new Worker(queue, baseWorkerOptions);
 
     worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await worker.stop();
 
-    // Wait for processing to complete (real timers)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(queue.isEmpty()).toBe(true);
+  });
 
+  it('processes multiple entries concurrently', async () => {
+    const queue = new InMemoryQueue();
+    const entries = Array.from({ length: 10 }, (_, i) => ({
+      timestamp: '2024-01-01T00:00:00Z',
+      level: 'info',
+      message: `entry-${i}`,
+    }));
+    queue.enqueue(entries);
+
+    const worker = new Worker(queue, baseWorkerOptions);
+
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 500));
     await worker.stop();
 
     expect(queue.isEmpty()).toBe(true);
@@ -54,14 +72,30 @@ describe('Worker', () => {
 
   it('starts and stops without errors', async () => {
     const queue = new InMemoryQueue();
-    const worker = new Worker(queue, {
-      concurrency: 5,
-      pollIntervalMs: 50,
-      maxRetries: 3,
-      simulatedDelayMs: 10,
-    });
+    const worker = new Worker(queue, baseWorkerOptions);
 
     worker.start();
     await worker.stop();
+  });
+
+  it('retries failed entries up to maxRetries', async () => {
+    const queue = new InMemoryQueue();
+    queue.enqueue([
+      { timestamp: '2024-01-01T00:00:00Z', level: 'error', message: 'will fail' },
+    ]);
+
+    // 100% failure rate to force retries
+    const worker = new Worker(queue, {
+      ...baseWorkerOptions,
+      failureRate: 1.0,
+      maxRetries: 2,
+    });
+
+    worker.start();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await worker.stop();
+
+    // Entry should be dequeued (even though it failed after max retries)
+    expect(queue.isEmpty()).toBe(true);
   });
 });

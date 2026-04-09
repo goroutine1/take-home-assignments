@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { rateLimitedCounter } from '../metrics';
 
 // Rate limiter interface for swapping implementations.
 // For multi-process deployments, implement this interface using
@@ -43,6 +44,7 @@ export function rateLimiterMiddleware(limiter: RateLimiter) {
     }
 
     if (!limiter.isAllowed(apiKey)) {
+      rateLimitedCounter.add(1);
       res.status(429).json({ error: 'Rate limit exceeded' });
       return;
     }

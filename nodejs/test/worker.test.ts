@@ -13,11 +13,22 @@ vi.mock('@opentelemetry/api', () => {
   const mockTracer = {
     startSpan: vi.fn(() => mockSpan),
   };
+  const noopCounter = { add: vi.fn() };
+  const noopHistogram = { record: vi.fn() };
+  const noopGauge = { addCallback: vi.fn() };
+  const mockMeter = {
+    createCounter: vi.fn(() => noopCounter),
+    createHistogram: vi.fn(() => noopHistogram),
+    createObservableGauge: vi.fn(() => noopGauge),
+  };
   return {
     trace: {
       getTracer: vi.fn(() => mockTracer),
       setSpan: vi.fn((_ctx: unknown, _span: unknown) => ({})),
       setSpanContext: vi.fn((_ctx: unknown, _spanCtx: unknown) => ({})),
+    },
+    metrics: {
+      getMeter: vi.fn(() => mockMeter),
     },
     SpanStatusCode: { OK: 1, ERROR: 2 },
     TraceFlags: { NONE: 0, SAMPLED: 1 },

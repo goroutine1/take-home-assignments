@@ -8,6 +8,7 @@ import { authMiddleware } from './middleware/auth';
 import { rateLimiterMiddleware, InMemorySlidingWindowLimiter } from './middleware/rate-limiter';
 import { validateLogsMiddleware } from './middleware/validate';
 import { Worker } from './worker/worker';
+import { logsIngestedCounter, registerQueueDepthCallback } from './metrics';
 
 export function createApp(overrides?: Partial<AppConfig>) {
   const cfg = { ...defaultConfig, ...overrides };
@@ -16,6 +17,9 @@ export function createApp(overrides?: Partial<AppConfig>) {
   const rateLimiter = new InMemorySlidingWindowLimiter(cfg.rateLimit.maxRequestsPerSecond);
   const queue = new InMemoryQueue(cfg.queue.maxSize);
   const worker = new Worker(queue, cfg.worker);
+
+  // Register queue depth gauge callback for OTel metrics
+  registerQueueDepthCallback(() => queue.size());
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -32,6 +36,20 @@ export function createApp(overrides?: Partial<AppConfig>) {
     res.json({ message: 'Log Ingestion Service', status: 'healthy' });
   });
 
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({
+      status: 'healthy',
+      queue: {
+        depth: queue.size(),
+        remaining: queue.remaining(),
+        full: queue.isFull(),
+      },
+      worker: {
+        concurrency: cfg.worker.concurrency,
+      },
+    });
+  });
+
   app.post(
     '/logs/json',
     authMiddleware(apiKeyStore),
@@ -41,7 +59,10 @@ export function createApp(overrides?: Partial<AppConfig>) {
       const entries = (req as Request & { logEntries: LogEntry[] }).logEntries;
 
       if (queue.remaining() < entries.length) {
-        res.status(503).json({ error: 'Service overloaded, try again later' });
+        res
+          .status(503)
+          .set('Retry-After', '5')
+          .json({ error: 'Service overloaded, try again later' });
         return;
       }
 
@@ -55,6 +76,7 @@ export function createApp(overrides?: Partial<AppConfig>) {
       }
 
       queue.enqueue(entries);
+      logsIngestedCounter.add(entries.length);
 
       res.status(202).json({
         accepted: entries.length,

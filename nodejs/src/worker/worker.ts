@@ -1,5 +1,6 @@
 import { trace, SpanStatusCode, context, TraceFlags } from '@opentelemetry/api';
 import { LogEntry, LogQueue } from '../queue/types';
+import { logsProcessedCounter, logsFailedCounter, processingLatencyHistogram } from '../metrics';
 
 export interface WorkerOptions {
   concurrency: number;
@@ -37,6 +38,7 @@ async function processEntry(entry: LogEntry, queue: LogQueue, retryCount: number
   }, parentContext);
 
   return context.with(trace.setSpan(parentContext, span), async () => {
+    const startTime = Date.now();
     try {
       // Simulate processing delay with some jitter
       const jitter = Math.random() * (simulatedDelayMs / 2);
@@ -62,6 +64,8 @@ async function processEntry(entry: LogEntry, queue: LogQueue, retryCount: number
       }));
 
       span.setStatus({ code: SpanStatusCode.OK });
+      logsProcessedCounter.add(1);
+      processingLatencyHistogram.record(Date.now() - startTime);
     } catch (err) {
       span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
       span.recordException(err as Error);
@@ -152,6 +156,7 @@ export class Worker {
         await delay(backoffMs);
         await this.processWithRetry(entry, attempt + 1);
       } else {
+        logsFailedCounter.add(1);
         console.log(JSON.stringify({
           level: 'error',
           message: 'Failed to process log entry after max retries',

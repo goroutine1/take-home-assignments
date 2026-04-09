@@ -13,7 +13,7 @@ const server = app.listen(config.port, () => {
 
 const gracefulShutdown = async () => {
   console.log(JSON.stringify({ level: 'info', message: 'Shutting down...' }));
-  server.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
   await shutdown();
   await sdk.shutdown().catch((err) =>
     console.error(JSON.stringify({ level: 'error', message: 'OTel SDK shutdown error', error: String(err) }))
